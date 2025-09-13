@@ -4,7 +4,8 @@ from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+# FIX: Import `cast` and `String` for type casting in queries
+from sqlalchemy import func, cast, String
 import math
 import pandas as pd
 import io
@@ -41,15 +42,12 @@ def get_db():
 
 # --- Database Seeding Logic (FIXED FOR POSTGRESQL) ---
 def init_db(db: Session):
-    # Check if the database is already seeded
     if db.query(models.Node).count() == 0:
         print("Database is empty, seeding with initial data...")
         
-        # Step 1: Insert all nodes without forward references in foreign keys.
         initial_nodes = [
             models.Node(id=1, label="نوع لباس", parent_id=None),
             models.Node(id=2, label="ورزشی", parent_id=1),
-            # default_child_id removed temporarily to avoid foreign key violation
             models.Node(id=3, label="رسمی", parent_id=1), 
             models.Node(id=4, label="کشسان", parent_id=2),
             models.Node(id=5, label="بدون کشسان", parent_id=2),
@@ -62,21 +60,17 @@ def init_db(db: Session):
                    formula="chest + waist - 10")
         ]
         db.add_all(initial_nodes)
-        db.commit()  # Commit to make all nodes exist in the DB.
+        db.commit()
 
-        # Step 2: Now that all nodes exist, safely add the foreign key reference.
         node_3 = db.query(models.Node).filter(models.Node.id == 3).first()
         if node_3:
             node_3.default_child_id = 6
-            db.commit()  # Commit the update.
+            db.commit()
         
         print("Database initialized successfully.")
 
-# FIX: Correctly check and initialize the database on startup.
-# The check for emptiness is now performed inside the session.
 with SessionLocal() as db:
     init_db(db)
-
 
 def get_children(parent_id: int, db: Session) -> list[models.Node]:
     return db.query(models.Node).filter(models.Node.parent_id == parent_id).all()
@@ -142,9 +136,10 @@ def get_all_nodes(search: Optional[str] = None, page: int = 1, page_size: int = 
     query = db.query(models.Node)
     if search:
         search_term = f"%{search}%"
+        # FIX: Cast integer `id` column to String for LIKE comparison in PostgreSQL
         query = query.filter(
             (models.Node.label.like(search_term)) |
-            (models.Node.id.like(search_term))
+            (cast(models.Node.id, String).like(search_term))
         )
     
     total = query.count()
@@ -206,7 +201,8 @@ def search_parents(q: str, db: Session = Depends(get_db)):
     search_term = f"%{q}%"
     return db.query(models.Node).filter(
         models.Node.is_end == False,
-        (models.Node.label.like(search_term)) | (models.Node.id.like(search_term))
+        # FIX: Cast integer `id` column to String for LIKE comparison in PostgreSQL
+        (models.Node.label.like(search_term)) | (cast(models.Node.id, String).like(search_term))
     ).limit(10).all()
 
 @app.get("/api/tree/roots", response_model=List[schemas.Node])
