@@ -5,7 +5,7 @@ from database import Base
 class Node(Base):
     __tablename__ = "nodes"
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     label = Column(String, index=True)
     parent_id = Column(Integer, ForeignKey("nodes.id"), nullable=True)
     is_end = Column(Boolean, default=False)
