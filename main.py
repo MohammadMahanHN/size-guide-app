@@ -67,12 +67,10 @@ def init_db(db: Session):
             node_3.default_child_id = 6
             db.commit()
         
-        # FINAL FIX: This synchronizes the auto-increment counter (sequence) in PostgreSQL
-        # with the manually inserted data. This is crucial for preventing duplicate key errors.
+        # FINAL FIX: This robustly synchronizes the auto-increment counter in PostgreSQL.
         if db.bind.dialect.name == "postgresql":
-            max_id = db.query(func.max(models.Node.id)).scalar()
-            # The sequence name is typically tablename_colname_seq
-            db.execute(text(f"SELECT setval('nodes_id_seq', {max_id}, true);"))
+            # This command dynamically finds the sequence name and sets it to the max current ID.
+            db.execute(text("SELECT setval(pg_get_serial_sequence('nodes', 'id'), (SELECT MAX(id) FROM nodes));"))
             db.commit()
 
         print("Database initialized and sequence reset successfully.")
@@ -160,8 +158,12 @@ def create_node(node: schemas.NodeCreate, db: Session = Depends(get_db)):
         parent = db.query(models.Node).filter(models.Node.id == node.parent_id).first()
         if not parent:
             raise HTTPException(status_code=400, detail=f"Parent with id {node.parent_id} not found")
-    # We don't pass an ID, we let the database generate it
+    
     node_data = node.model_dump()
+    # Safeguard: ensure ID is never set manually on creation
+    if 'id' in node_data:
+        del node_data['id']
+        
     db_node = models.Node(**node_data)
     db.add(db_node)
     db.commit()
@@ -198,9 +200,15 @@ def delete_node(node_id: int, db: Session = Depends(get_db)):
     if not db_node:
         raise HTTPException(status_code=404, detail="Node not found")
     
+    # Check for parent_id references
     children_count = db.query(models.Node).filter(models.Node.parent_id == node_id).count()
     if children_count > 0:
         raise HTTPException(status_code=400, detail=f"Cannot delete node. It is a parent to {children_count} other nodes.")
+
+    # FIX: Add check for default_child_id references
+    referencing_nodes_count = db.query(models.Node).filter(models.Node.default_child_id == node_id).count()
+    if referencing_nodes_count > 0:
+        raise HTTPException(status_code=400, detail=f"Cannot delete node. It is referenced as a default child by {referencing_nodes_count} other nodes.")
 
     db.delete(db_node)
     db.commit()
@@ -259,6 +267,12 @@ def import_nodes(file: UploadFile = File(...), db: Session = Depends(get_db)):
                 new_node = models.Node(**node_data)
                 db.add(new_node)
         db.commit()
+        
+        # After import, always reset the sequence
+        if db.bind.dialect.name == "postgresql":
+            db.execute(text("SELECT setval(pg_get_serial_sequence('nodes', 'id'), (SELECT MAX(id) FROM nodes));"))
+            db.commit()
+            
         return {"detail": f"Successfully processed {len(df)} rows."}
     except Exception as e:
         db.rollback()
