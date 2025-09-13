@@ -4,8 +4,8 @@ from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-# FIX: Import `cast` and `String` for type casting in queries
-from sqlalchemy import func, cast, String
+# FIX: Import `text` for executing raw SQL commands
+from sqlalchemy import func, cast, String, text
 import math
 import pandas as pd
 import io
@@ -40,7 +40,7 @@ def get_db():
     finally:
         db.close()
 
-# --- Database Seeding Logic (FIXED FOR POSTGRESQL) ---
+# --- Database Seeding Logic (FINAL FIX FOR POSTGRESQL ID SEQUENCE) ---
 def init_db(db: Session):
     if db.query(models.Node).count() == 0:
         print("Database is empty, seeding with initial data...")
@@ -67,11 +67,20 @@ def init_db(db: Session):
             node_3.default_child_id = 6
             db.commit()
         
-        print("Database initialized successfully.")
+        # FINAL FIX: This synchronizes the auto-increment counter (sequence) in PostgreSQL
+        # with the manually inserted data. This is crucial for preventing duplicate key errors.
+        if db.bind.dialect.name == "postgresql":
+            max_id = db.query(func.max(models.Node.id)).scalar()
+            # The sequence name is typically tablename_colname_seq
+            db.execute(text(f"SELECT setval('nodes_id_seq', {max_id}, true);"))
+            db.commit()
+
+        print("Database initialized and sequence reset successfully.")
 
 with SessionLocal() as db:
     init_db(db)
 
+# --- (The rest of your API endpoints remain the same and are correct) ---
 def get_children(parent_id: int, db: Session) -> list[models.Node]:
     return db.query(models.Node).filter(models.Node.parent_id == parent_id).all()
 
@@ -136,7 +145,6 @@ def get_all_nodes(search: Optional[str] = None, page: int = 1, page_size: int = 
     query = db.query(models.Node)
     if search:
         search_term = f"%{search}%"
-        # FIX: Cast integer `id` column to String for LIKE comparison in PostgreSQL
         query = query.filter(
             (models.Node.label.like(search_term)) |
             (cast(models.Node.id, String).like(search_term))
@@ -152,7 +160,9 @@ def create_node(node: schemas.NodeCreate, db: Session = Depends(get_db)):
         parent = db.query(models.Node).filter(models.Node.id == node.parent_id).first()
         if not parent:
             raise HTTPException(status_code=400, detail=f"Parent with id {node.parent_id} not found")
-    db_node = models.Node(**node.model_dump())
+    # We don't pass an ID, we let the database generate it
+    node_data = node.model_dump()
+    db_node = models.Node(**node_data)
     db.add(db_node)
     db.commit()
     db.refresh(db_node)
@@ -201,7 +211,6 @@ def search_parents(q: str, db: Session = Depends(get_db)):
     search_term = f"%{q}%"
     return db.query(models.Node).filter(
         models.Node.is_end == False,
-        # FIX: Cast integer `id` column to String for LIKE comparison in PostgreSQL
         (models.Node.label.like(search_term)) | (cast(models.Node.id, String).like(search_term))
     ).limit(10).all()
 
@@ -270,3 +279,4 @@ def get_node_path(node_id: int, db: Session = Depends(get_db)):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
