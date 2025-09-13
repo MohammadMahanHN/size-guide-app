@@ -10,19 +10,20 @@ import pandas as pd
 import io
 from typing import List, Optional
 
+# --- Import local modules ---
 import models
 import schemas
-from database import SessionLocal, engine
+from database import SessionLocal, engine, DATABASE_URL
 
 # --- Path Correction for PyInstaller ---
 def resource_path(relative_path):
-    """ Get absolute path to resource, works for dev and for PyInstaller """
     try:
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
+# Create database tables
 models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
@@ -38,12 +39,18 @@ def get_db():
     finally:
         db.close()
 
+# --- Database Seeding Logic (FIXED FOR POSTGRESQL) ---
 def init_db(db: Session):
+    # Check if the database is already seeded
     if db.query(models.Node).count() == 0:
+        print("Database is empty, seeding with initial data...")
+        
+        # Step 1: Insert all nodes without forward references in foreign keys.
         initial_nodes = [
             models.Node(id=1, label="نوع لباس", parent_id=None),
             models.Node(id=2, label="ورزشی", parent_id=1),
-            models.Node(id=3, label="رسمی", parent_id=1, default_child_id=6),
+            # default_child_id removed temporarily to avoid foreign key violation
+            models.Node(id=3, label="رسمی", parent_id=1), 
             models.Node(id=4, label="کشسان", parent_id=2),
             models.Node(id=5, label="بدون کشسان", parent_id=2),
             models.Node(id=6, label="کت و شلوار", parent_id=3, is_end=True, formula="height * 2 + chest"),
@@ -55,11 +62,21 @@ def init_db(db: Session):
                    formula="chest + waist - 10")
         ]
         db.add_all(initial_nodes)
-        db.commit()
-        print("Database initialized with sample data.")
+        db.commit()  # Commit to make all nodes exist in the DB.
 
-with SessionLocal() as db:
-    init_db(db)
+        # Step 2: Now that all nodes exist, safely add the foreign key reference.
+        node_3 = db.query(models.Node).filter(models.Node.id == 3).first()
+        if node_3:
+            node_3.default_child_id = 6
+            db.commit()  # Commit the update.
+        
+        print("Database initialized successfully.")
+
+# Initialize DB on startup (only if it's not a test DB)
+# For SQLite, this will run on startup. For Render's Postgres, this runs once on first deploy.
+if "sqlite" in DATABASE_URL or db.query(models.Node).count() == 0:
+    with SessionLocal() as db:
+        init_db(db)
 
 def get_children(parent_id: int, db: Session) -> list[models.Node]:
     return db.query(models.Node).filter(models.Node.parent_id == parent_id).all()
@@ -74,7 +91,6 @@ def get_path(node_id: int, db: Session) -> list[str]:
         current = db.query(models.Node).filter(models.Node.id == current.parent_id).first()
     return path
 
-# --- API Endpoints ---
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -206,48 +222,37 @@ def export_nodes(db: Session = Depends(get_db)):
     nodes = db.query(models.Node).all()
     if not nodes:
         raise HTTPException(status_code=404, detail="No nodes to export.")
-    
     df_data = []
     for node in nodes:
         node_dict = {c.name: getattr(node, c.name) for c in node.__table__.columns}
         df_data.append(node_dict)
-
     df = pd.DataFrame(df_data)
-    
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
         df.to_excel(writer, index=False, sheet_name='Nodes')
     output.seek(0)
-
-    headers = {
-        'Content-Disposition': 'attachment; filename="nodes_export.xlsx"'
-    }
+    headers = {'Content-Disposition': 'attachment; filename="nodes_export.xlsx"'}
     return StreamingResponse(output, headers=headers, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
 
 @app.post("/api/nodes/import")
 def import_nodes(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith('.xlsx'):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload an .xlsx file.")
-
     try:
         df = pd.read_excel(file.file)
         df = df.where(pd.notnull(df), None)
-        
         for index, row in df.iterrows():
             node_data = row.to_dict()
             node_id = node_data.get('id')
-            if not node_id:
-                continue
-
+            if not node_id: continue
             existing_node = db.query(models.Node).filter(models.Node.id == node_id).first()
             if existing_node:
                 for key, value in node_data.items():
-                    if hasattr(existing_node, key):
-                        setattr(existing_node, key, value)
+                    if hasattr(existing_node, key): setattr(existing_node, key, value)
             else:
                 new_node = models.Node(**node_data)
                 db.add(new_node)
-        
         db.commit()
         return {"detail": f"Successfully processed {len(df)} rows."}
     except Exception as e:
@@ -256,14 +261,14 @@ def import_nodes(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
 @app.get("/api/tree/path/{node_id}", response_model=List[int])
 def get_node_path(node_id: int, db: Session = Depends(get_db)):
+    # ... (code is the same)
     path_ids = []
     current = db.query(models.Node).filter(models.Node.id == node_id).first()
     if not current:
         raise HTTPException(status_code=404, detail="Node not found")
     while current:
         path_ids.insert(0, current.id)
-        if current.parent_id is None:
-            break
+        if current.parent_id is None: break
         current = db.query(models.Node).filter(models.Node.id == current.parent_id).first()
     return path_ids
 
