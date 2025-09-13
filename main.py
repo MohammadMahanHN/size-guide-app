@@ -72,11 +72,11 @@ def init_db(db: Session):
         
         print("Database initialized successfully.")
 
-# Initialize DB on startup (only if it's not a test DB)
-# For SQLite, this will run on startup. For Render's Postgres, this runs once on first deploy.
-if "sqlite" in DATABASE_URL or db.query(models.Node).count() == 0:
-    with SessionLocal() as db:
-        init_db(db)
+# FIX: Correctly check and initialize the database on startup.
+# The check for emptiness is now performed inside the session.
+with SessionLocal() as db:
+    init_db(db)
+
 
 def get_children(parent_id: int, db: Session) -> list[models.Node]:
     return db.query(models.Node).filter(models.Node.parent_id == parent_id).all()
@@ -261,7 +261,6 @@ def import_nodes(file: UploadFile = File(...), db: Session = Depends(get_db)):
 
 @app.get("/api/tree/path/{node_id}", response_model=List[int])
 def get_node_path(node_id: int, db: Session = Depends(get_db)):
-    # ... (code is the same)
     path_ids = []
     current = db.query(models.Node).filter(models.Node.id == node_id).first()
     if not current:
